@@ -1,0 +1,75 @@
+import numpy as np
+import pandas as pd
+import talib
+import requests
+from io import StringIO
+
+def initialize(context):
+    context.asset = 'EURUSD'
+    context.timeframe = 5
+    context.ma_fast = 20
+    context.ma_slow = 50
+    context.amount = 10
+    context.loss_count = 0
+    
+    # Define session times
+    context.london_open = pd.Timestamp('07:00', tz='Europe/London')
+    context.london_close = pd.Timestamp('16:00', tz='Europe/London')
+    context.newyork_open = pd.Timestamp('12:00', tz='America/New_York')
+    context.newyork_close = pd.Timestamp('21:00', tz='America/New_York')
+    
+    # Get economic calendar
+    response = requests.get('https://www.forexfactory.com/calendar.php?week=this')
+    html = response.text
+    df = pd.read_html(StringIO(html), header=0)[0]
+    df = df[['Time', 'Currency', 'Event', 'Actual', 'Forecast', 'Previous']]
+    df['Time'] = pd.to_datetime(df['Time'])
+    df = df.set_index('Time')
+    context.calendar = df
+    
+    # Set fixed lot size based on account balance
+    context.lot_size = context.portfolio.cash * 0.005
+    context.risk_reward_ratio = 3.0
+
+def handle_data(context, data):
+    current_time = pd.Timestamp.now(tz='UTC')
+    
+    # Check if there is any news release in the next 30 minutes
+    news_release = context.calendar.loc[current_time:current_time+pd.Timedelta(minutes=30)]
+    if not news_release.empty:
+        return
+    
+    # Only trade Forex and derivatives
+    if data.current(context.asset, 'security_type') != 'forex' or data.current(context.asset, 'exchange') not in ['IDEALPRO', 'SMART']:
+        return
+    
+    if current_time >= context.london_open and current_time <= context.london_close:
+        session = 'London'
+    elif current_time >= context.newyork_open and current_time <= context.newyork_close:
+        session = 'New York'
+    else:
+        session = 'Other'
+    
+    # Focus on the 4-hour candle
+    if current_time.minute != 0 or current_time.hour % 4 != 0:
+        return
+    
+    prices = data.history(context.asset, ['open', 'high', 'low', 'close'], context.ma_slow, f'{context.timeframe}min')
+    current_price = prices['close'][-1]
+    previous_price = prices['close'][-2]
+    current_high = prices['high'][-1]
+    previous_high = prices['high'][-2]
+    current_low = prices['low'][-1]
+    previous_low = prices['low'][-2]
+    current_candle_range = current_high - current_low
+    previous_candle_range = previous_high - previous_low
+    
+    if context.loss_count > 0:
+        # Reevaluate the analysis after a loss
+        context.loss_count = 0
+        return
+    
+    # Focus on price action and use indicators for more evidence
+    if session in ['London', 'New York'] and current_price > previous_price:
+        if previous_low + 0.5 * previous_candle_range > current_low and previous_high > current_low and current_price > current_low:
+            ma_fast = talib.SMA
